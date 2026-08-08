@@ -41,14 +41,14 @@ class Settings:
     chroma_tenant: str = field(default_factory=lambda: _require("CHROMA_TENANT"))
     chroma_database: str = field(default_factory=lambda: _require("CHROMA_DATABASE"))
 
-    grok_api_key: str = field(default_factory=lambda: _require("GROK_API_KEY"))
-    grok_api_base_url: str = field(
+    groq_api_key: str = field(default_factory=lambda: _require("GROQ_API_KEY"))
+    groq_api_base_url: str = field(
         default_factory=lambda: os.getenv(
-            "GROK_API_BASE_URL", "https://api.x.ai/v1"
+            "GROQ_API_BASE_URL", "https://api.groq.com/openai/v1"
         )
     )
-    grok_model: str = field(
-        default_factory=lambda: os.getenv("GROK_MODEL", "grok-3")
+    groq_model: str = field(
+        default_factory=lambda: os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     )
 
     log_level: str = field(
