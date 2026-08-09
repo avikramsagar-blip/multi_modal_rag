@@ -48,18 +48,20 @@ No external OCR API, no external transcription API, no external embedding API.
 
 ### 2.3 Internal module structure
 
-The application is one deployable unit but organized as separate internal modules:
+The application is one deployable unit organized as separate internal modules:
 
 ```text
 app.py
 ui/
-  upload.py
-  chat.py
+  upload.py       ← Flow 1 ingestion UI
+  chat.py         ← Flow 2 chat UI
   status.py
 core/
   config.py
   limits.py
   state.py
+  logging_config.py   ← new: centralized logging
+  preflight.py        ← new: startup dependency checks
 ingestion/
   router.py
   validators.py
@@ -76,18 +78,18 @@ embeddings/
 vectorstore/
   chroma_client.py
 retrieval/
-  search.py
-  router.py
-  merge.py
-  citations.py
+  router.py       ← keyword-based collection selector
+  search.py       ← session-filtered Chroma queries
+  merge.py        ← dedup, context assembly, token limiting
+  citations.py    ← source reference formatting
 llm/
-  grok_client.py
+  grok_client.py  ← Grok API via Groq endpoint
 storage/
-  sqlite_chat.py
+  sqlite_chat.py  ← chat history persistence
   file_store.py
 utils/
   ffmpeg.py
-  ocr.py
+  ocr.py          ← Tesseract + pytesseract
 ```
 
 ---
@@ -114,7 +116,7 @@ utils/
 | File router | txt / pdf / image / audio / video routing | mandatory |
 | Text parser | plain text, markdown, CSV, JSON parsing | mandatory |
 | PDF parser | digital PDF text extraction via PyMuPDF | mandatory |
-| OCR processor | scanned PDF and image text extraction via PaddleOCR | mandatory |
+| OCR processor | scanned PDF and image text extraction via Tesseract \+ pytesseract | mandatory |
 | Audio transcription processor | audio to transcript via Faster-Whisper | mandatory if audio is in scope |
 | Video processor | extract audio and keyframes via FFmpeg | mandatory if video is in scope |
 | Metadata builder | page number, timestamp, parser type, OCR confidence | mandatory |
@@ -146,7 +148,7 @@ All sizes are approximate operational footprints. Actual values vary by OS, Pyth
 | Area | Tool / Model | Role | Approx footprint | MVP decision |
 |---|---|---|---|---|
 | PDF parsing | PyMuPDF | digital PDF text extraction | tens of MB; no model download | use |
-| OCR | PaddleOCR | scanned PDF and image text extraction | 100 MB – 300 MB+ with OCR models | use with file limits |
+| OCR | Tesseract + pytesseract | scanned PDF and image text extraction | 100 MB – 300 MB+ with OCR models | use with file limits |
 | Audio transcription | Faster-Whisper | speech-to-text for audio and video | `base` ~150 MB, `small` ~500 MB | start with `base` |
 | Video extraction | FFmpeg | audio extraction and keyframe capture | tens to low hundreds of MB | use |
 | Text embeddings | `BAAI/bge-small-en-v1.5` | text, OCR text, transcript embeddings | ~100 MB – 200 MB | primary text model |
@@ -182,9 +184,9 @@ Per-page classification — classify each page individually, not the document as
 | Page type | Detection | Processing |
 |---|---|---|
 | `digital_text_page` | character count ≥ threshold via PyMuPDF | extract text, chunk, embed with BGE |
-| `scanned_page` | character count < threshold | render to image, run PaddleOCR, embed text with BGE |
+| `scanned_page` | character count < threshold | render to image, run Tesseract \+ pytesseract, embed text with BGE |
 | `mixed_text_image_page` | text above threshold AND image blocks detected | extract text with PyMuPDF + run OCR and OpenCLIP on image blocks |
-| `image_only_page` | page is one large embedded image | run PaddleOCR for text + OpenCLIP for image embedding |
+| `image_only_page` | page is one large embedded image | run Tesseract \+ pytesseract for text + OpenCLIP for image embedding |
 | `table_heavy_page` | structured grid detected | chunk by row if parseable; fall back to OCR |
 
 Text output → `text_chunks` or `ocr_chunks`
@@ -195,7 +197,7 @@ All records linked by `document_id` and `page_number`.
 
 1. load image; convert RGBA to RGB if needed
 2. check resolution — skip OCR if below minimum
-3. run PaddleOCR if text is likely present; store result in `ocr_chunks`
+3. run Tesseract \+ pytesseract if text is likely present; store result in `ocr_chunks`
 4. generate OpenCLIP embedding regardless
 5. store image embedding in `image_chunks`
 6. link both records by `source_file_name` and `document_id`
@@ -269,6 +271,31 @@ Every record in every collection includes:
 
 **upload → validation → classify → parse → chunk → embed → write to Chroma → mark ready**
 
+### 7.0 Visual flow map
+
+```mermaid
+flowchart TD
+    A[Upload file] --> B[Validate file]
+    B --> C[Detect canonical type: txt/pdf/image/audio/video]
+    C --> D[Parser creates chunks]
+    D --> E[Choose embedder]
+    E --> F[Map chunk modality to fixed collection]
+    F --> G[Upsert to Chroma]
+    G --> H[Mark ingestion_status complete]
+
+    E1[Text embedder 384-dim] --> F1[text_chunks / ocr_chunks / audio_transcript_chunks / video_transcript_chunks]
+    E2[Image embedder 512-dim] --> F2[image_chunks / video_keyframe_chunks]
+```
+
+### 7.0.1 Why collections are created at startup
+
+- Collections are **fixed by modality**, not by uploaded file name.
+- They are created/verified at app startup to avoid first-write failures during ingestion.
+- This also guarantees that vector dimensions stay valid per collection family:
+  - text-family collections receive BGE vectors
+  - image-family collections receive OpenCLIP vectors
+- A file upload adds records to existing collections; it does **not** create a new collection per file.
+
 1. user uploads file in Streamlit UI
 2. app validates: MIME type, extension, file size, byte integrity, duplicate hash check
 3. app routes file to the correct parser based on type
@@ -334,6 +361,30 @@ Every record in every collection includes:
 | `document_scope` | which documents were in scope for this turn |
 | `grok_request_id` | auditability of Grok calls |
 
+### 8.3 Session and document differentiation model
+
+This project uses **shared fixed collections** plus metadata-based isolation. Collection names do not change per user, per file, or per session.
+
+How differentiation works:
+
+1. **Per file:** each uploaded file gets a new `document_id`.
+2. **Per chunk:** each chunk gets a unique `chunk_id` tied to its `document_id`.
+3. **Per session:** every record stores `session_id`.
+4. **Per source:** records keep `source_file_name` and `source_type`.
+
+Practical implications:
+
+- If a user uploads `notes.txt` and later uploads `invoice.pdf`, both files are stored in the same fixed collections, but with different `document_id` values.
+- If multiple users/sessions ingest data, all records coexist in the same collections; Flow 2 retrieval must filter by `session_id` (and optionally by `document_id` or `source_file_name`) to avoid cross-session leakage.
+- No new collection names are introduced for new sessions. Isolation is done by metadata filters, not by dynamic collection creation.
+
+### 8.4 Session-only chat rule (required behavior)
+
+- A user can chat only with documents uploaded in the **current session**.
+- Creating a new session starts a fresh scope for uploads and chat.
+- New-session uploads are stored in the same fixed collections, but with a new `session_id`.
+- Flow 2 retrieval must apply `session_id == current_session_id` on every query before ranking/merging results.
+
 ---
 
 ## 9) Infra Advantages and Limitations
@@ -364,7 +415,7 @@ Every record in every collection includes:
 |---|---|
 | UI and application shell | Streamlit |
 | PDF parsing | PyMuPDF |
-| OCR | PaddleOCR |
+| OCR | Tesseract \+ pytesseract |
 | Audio transcription | Faster-Whisper (`base` model) |
 | Video extraction | FFmpeg |
 | Text embedding model | `BAAI/bge-small-en-v1.5` |
@@ -382,7 +433,7 @@ Every record in every collection includes:
 | 3 | Chroma Cloud connection and collection initialization |
 | 4 | text file parsing, chunking, BGE embeddings, Chroma write |
 | 5 | digital PDF parsing with PyMuPDF |
-| 6 | PDF page classification and PaddleOCR for scanned pages |
+| 6 | PDF page classification and Tesseract + pytesseract for scanned pages |
 | 7 | image file OCR and OpenCLIP embedding |
 | 8 | deterministic query router and Chroma retrieval |
 | 9 | context assembly and Grok answer generation with citations |
@@ -443,9 +494,9 @@ Do **not** classify at the document level. Classify at the **page level**.
 | Page type | Detection rule | Processing strategy |
 |---|---|---|
 | `digital_text_page` | text extraction yields above a minimum character threshold | use PyMuPDF text extraction only |
-| `scanned_page` | text extraction yields below threshold; page is a rasterised image | render page to image, run PaddleOCR |
+| `scanned_page` | text extraction yields below threshold; page is a rasterised image | render page to image, run Tesseract \+ pytesseract |
 | `mixed_text_image_page` | text extraction yields some text AND page contains embedded image blocks | extract text from PyMuPDF, extract image blocks separately, run image through OpenCLIP, OCR if needed |
-| `image_only_page` | entire page is one large embedded image, no selectable text | render to image, run PaddleOCR for text + OpenCLIP for image embedding |
+| `image_only_page` | entire page is one large embedded image, no selectable text | render to image, run Tesseract \+ pytesseract for text + OpenCLIP for image embedding |
 | `table_heavy_page` | page has structured grid/table rendering detected | mark as table type in metadata; chunk by table rows if parseable, fall back to OCR |
 
 #### How to detect page type
@@ -632,7 +683,7 @@ If the user asks a question before any file has been ingested:
 | App reruns on every widget interaction | Streamlit re-executes the full script on any UI event | Use `st.session_state` to preserve model loading state between reruns |
 | Embedding models loaded on every request | Each user interaction re-loads BGE or OpenCLIP | Load models once at app start and store in `st.session_state`; do not reload per request |
 | Multiple users on same Streamlit deployment | Shared process state causes data leakage | Isolate session data using `st.session_state` keyed to session token or user; do not use global variables for user data |
-| Long-running ingestion blocks UI | PaddleOCR or Faster-Whisper occupies main thread | Use `st.spinner` for UX feedback; for MVP this is acceptable; note it as a known limitation |
+| Long-running ingestion blocks UI | Tesseract \+ pytesseract or Faster-Whisper occupies main thread | Use `st.spinner` for UX feedback; for MVP this is acceptable; note it as a known limitation |
 | App crashes mid-ingestion | Partial data written to vector DB | Tag ingestion run with a `status` field in metadata; only mark as ready-to-chat once all chunks are confirmed written |
 
 ---

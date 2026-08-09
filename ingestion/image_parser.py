@@ -16,8 +16,11 @@ import streamlit as st
 from PIL import Image
 
 from core.limits import MAX_IMAGE_PX, MIN_OCR_CONFIDENCE, MIN_OCR_RESOLUTION
+from core.logging_config import get_logger
 from ingestion.metadata import build_metadata
 from utils.ocr import run_ocr
+
+logger = get_logger(__name__)
 
 
 def _load_and_normalize(file_bytes: bytes) -> Image.Image:
@@ -51,6 +54,7 @@ def parse_image(
     image_embedder = st.session_state["image_embedder"]
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "img"
+    logger.info("Parsing image | file=%s", filename)
 
     # Handle multi-frame images (TIFF, animated GIF)
     raw = Image.open(io.BytesIO(file_bytes))
@@ -83,7 +87,14 @@ def parse_image(
         pixel_count = pil_img.size[0] * pil_img.size[1]
         if pixel_count >= MIN_OCR_RESOLUTION:
             ocr_text, confidence = run_ocr(pil_img)
-            if ocr_text and confidence >= MIN_OCR_CONFIDENCE:
+            if ocr_text:
+                if confidence < MIN_OCR_CONFIDENCE:
+                    logger.warning(
+                        "Low OCR confidence retained | file=%s | frame=%d | confidence=%.3f",
+                        filename,
+                        frame_idx,
+                        confidence,
+                    )
                 chunk_id = f"{document_id}{frame_tag}_ocr"
                 [embedding] = text_embedder.embed([ocr_text])
                 meta = build_metadata(
@@ -100,6 +111,13 @@ def parse_image(
                 results.append(
                     {"chunk_id": chunk_id, "embedding": embedding, "text": ocr_text, "metadata": meta}
                 )
+        else:
+            logger.warning(
+                "OCR skipped due to low resolution | file=%s | frame=%d | pixels=%d",
+                filename,
+                frame_idx,
+                pixel_count,
+            )
 
         # ── Image embedding path ─────────────────────────────────────────
         chunk_id = f"{document_id}{frame_tag}_img"
@@ -118,4 +136,5 @@ def parse_image(
             {"chunk_id": chunk_id, "embedding": img_embedding, "text": "", "metadata": meta}
         )
 
+    logger.info("Image parsed | file=%s | chunks=%d", filename, len(results))
     return results

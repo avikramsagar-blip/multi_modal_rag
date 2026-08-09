@@ -8,7 +8,10 @@ Wraps each parser call in error handling — never crashes the app.
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
+
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def route_file(
@@ -32,6 +35,13 @@ def route_file(
         On parser error, returns a single error-marker dict (no Chroma write).
     """
     document_id = uuid.uuid4().hex
+    logger.info(
+        "Routing file | session_id=%s | document_id=%s | file=%s | file_type=%s",
+        session_id,
+        document_id,
+        filename,
+        file_type,
+    )
 
     try:
         if file_type == "txt":
@@ -57,5 +67,12 @@ def route_file(
         raise ValueError(f"Unsupported file type: '{file_type}'")
 
     except Exception as exc:
+        logger.exception(
+            "Parser error | session_id=%s | document_id=%s | file=%s | file_type=%s",
+            session_id,
+            document_id,
+            filename,
+            file_type,
+        )
         # Return an error marker instead of raising — lets the UI report it cleanly
         return [{"error": True, "message": str(exc), "filename": filename}]

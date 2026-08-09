@@ -18,20 +18,23 @@ from pathlib import Path
 import imagehash
 import streamlit as st
 from PIL import Image
+from PIL import ImageStat
 
 from core.limits import (
     KEYFRAME_INTERVAL_SEC,
     MAX_KEYFRAMES,
     MAX_VIDEO_SEC,
-    MIN_TRANSCRIPT_WORDS,
 )
+from core.logging_config import get_logger
 from ingestion.audio_parser import parse_audio
-from ingestion.chunking import chunk_text
 from ingestion.metadata import build_metadata
 from utils.ffmpeg import extract_audio, extract_keyframes, get_video_duration
 
 # Perceptual hash distance threshold for near-duplicate frame detection
 _HASH_DISTANCE_THRESHOLD = 10
+_MIN_BRIGHTNESS = 8.0
+
+logger = get_logger(__name__)
 
 
 def _deduplicate_frames(
@@ -50,6 +53,13 @@ def _deduplicate_frames(
     return unique
 
 
+def _is_blank_or_dark(image: Image.Image) -> bool:
+    """Return True when a frame is likely blank/very dark."""
+    grayscale = image.convert("L")
+    brightness = float(ImageStat.Stat(grayscale).mean[0])
+    return brightness < _MIN_BRIGHTNESS
+
+
 def parse_video(
     file_bytes: bytes,
     filename: str,
@@ -61,6 +71,7 @@ def parse_video(
     """
     image_embedder = st.session_state["image_embedder"]
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "video"
+    logger.info("Parsing video | file=%s", filename)
 
     # Stage video to disk (FFmpeg needs a file path)
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
@@ -73,6 +84,12 @@ def parse_video(
         # Duration guard
         duration = get_video_duration(video_path)
         if duration > MAX_VIDEO_SEC:
+            logger.warning(
+                "Video exceeds duration limit | file=%s | duration=%.2f | max=%d",
+                filename,
+                duration,
+                MAX_VIDEO_SEC,
+            )
             raise ValueError(
                 f"Video duration {duration:.0f}s exceeds limit of {MAX_VIDEO_SEC}s."
             )
@@ -101,7 +118,7 @@ def parse_video(
             results.extend(audio_chunks)
         except ValueError:
             # No audio track — skip transcript pipeline
-            pass
+            logger.warning("Video has no audio track; transcript pipeline skipped | file=%s", filename)
         finally:
             if audio_path:
                 audio_path.unlink(missing_ok=True)
@@ -112,7 +129,18 @@ def parse_video(
             interval_sec=KEYFRAME_INTERVAL_SEC,
             max_frames=MAX_KEYFRAMES,
         )
-        unique_frames = _deduplicate_frames(frames)
+        non_blank_frames = [(ts, img) for ts, img in frames if not _is_blank_or_dark(img)]
+        dropped_blank = len(frames) - len(non_blank_frames)
+        if dropped_blank:
+            logger.warning("Dropped blank/dark frames | file=%s | count=%d", filename, dropped_blank)
+
+        unique_frames = _deduplicate_frames(non_blank_frames)
+        logger.info(
+            "Keyframes selected | file=%s | raw=%d | filtered=%d",
+            filename,
+            len(frames),
+            len(unique_frames),
+        )
 
         if unique_frames:
             pil_images = [img for _, img in unique_frames]
@@ -140,4 +168,5 @@ def parse_video(
     finally:
         video_path.unlink(missing_ok=True)
 
+    logger.info("Video parsed | file=%s | chunks=%d", filename, len(results))
     return results

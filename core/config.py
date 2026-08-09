@@ -35,20 +35,35 @@ def _require(key: str) -> str:
     return value
 
 
+def _get_with_fallback(primary_key: str, fallback_key: str) -> str:
+    value = os.getenv(primary_key) or os.getenv(fallback_key)
+    if not value:
+        raise EnvironmentError(
+            f"Required environment variable '{primary_key}' is not set. "
+            f"(Accepted fallback: '{fallback_key}'). Add it to your .env file."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     chroma_api_key: str = field(default_factory=lambda: _require("CHROMA_API_KEY"))
     chroma_tenant: str = field(default_factory=lambda: _require("CHROMA_TENANT"))
     chroma_database: str = field(default_factory=lambda: _require("CHROMA_DATABASE"))
 
-    groq_api_key: str = field(default_factory=lambda: _require("GROQ_API_KEY"))
-    groq_api_base_url: str = field(
+    grok_api_key: str = field(
+        default_factory=lambda: _get_with_fallback("GROK_API_KEY", "GROQ_API_KEY")
+    )
+    grok_api_base_url: str = field(
         default_factory=lambda: os.getenv(
-            "GROQ_API_BASE_URL", "https://api.groq.com/openai/v1"
+            "GROK_API_BASE_URL",
+            os.getenv("GROQ_API_BASE_URL", "https://api.groq.com/openai/v1"),
         )
     )
-    groq_model: str = field(
-        default_factory=lambda: os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    grok_model: str = field(
+        default_factory=lambda: os.getenv(
+            "GROK_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        )
     )
 
     log_level: str = field(

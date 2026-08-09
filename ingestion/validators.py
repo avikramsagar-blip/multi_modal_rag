@@ -12,6 +12,9 @@ import hashlib
 import filetype
 
 from core.limits import MAX_UPLOAD_MB
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Supported MIME types mapped to their canonical extension group
 SUPPORTED_MIME_TYPES: dict[str, str] = {
@@ -52,6 +55,30 @@ SUPPORTED_EXTENSIONS: list[str] = [
     "mp4", "mkv", "avi", "mov", "webm",
 ]
 
+EXTENSION_TO_GROUP: dict[str, str] = {
+    "txt": "txt",
+    "md": "txt",
+    "csv": "txt",
+    "json": "txt",
+    "pdf": "pdf",
+    "jpg": "image",
+    "jpeg": "image",
+    "png": "image",
+    "webp": "image",
+    "tiff": "image",
+    "gif": "image",
+    "mp3": "audio",
+    "wav": "audio",
+    "m4a": "audio",
+    "flac": "audio",
+    "ogg": "audio",
+    "mp4": "video",
+    "mkv": "video",
+    "avi": "video",
+    "mov": "video",
+    "webm": "video",
+}
+
 
 def validate_not_empty(file_bytes: bytes) -> None:
     """Reject zero-byte files."""
@@ -75,10 +102,10 @@ def validate_mime(file_bytes: bytes, filename: str) -> str:
     Raises ValueError if the type is not supported.
     """
     detected = filetype.guess(file_bytes)
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     # filetype cannot detect plain text — fall back to extension
     if detected is None:
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         text_extensions = {"txt", "md", "csv", "json"}
         if ext in text_extensions:
             return "txt"
@@ -94,7 +121,23 @@ def validate_mime(file_bytes: bytes, filename: str) -> str:
             f"Supported types: {', '.join(SUPPORTED_EXTENSIONS)}"
         )
 
-    return SUPPORTED_MIME_TYPES[mime]
+    mime_group = SUPPORTED_MIME_TYPES[mime]
+    ext_group = EXTENSION_TO_GROUP.get(ext)
+
+    if ext_group and ext_group != mime_group:
+        logger.warning(
+            "Extension mismatch | file=%s | ext_group=%s | mime=%s | mime_group=%s",
+            filename,
+            ext_group,
+            mime,
+            mime_group,
+        )
+        raise ValueError(
+            f"File extension/content mismatch for '{filename}'. "
+            f"Detected content type '{mime}' does not match extension '.{ext}'."
+        )
+
+    return mime_group
 
 
 def compute_hash(file_bytes: bytes) -> str:

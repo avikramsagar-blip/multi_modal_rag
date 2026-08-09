@@ -150,11 +150,11 @@ Flow 2 covers everything from:
 | Image embeddings | OpenCLIP / CLIP ViT-B/32 | Mature, open-source image-text embedding | Reasonably light |
 | Audio pipeline | Faster-Whisper + LAION CLAP | Transcript + audio-semantic retrieval | Start with transcript-only if needed |
 | Video pipeline | FFmpeg + Faster-Whisper + keyframes + CLIP | Practical and lightweight | Better than heavy end-to-end video models |
-| PDF extraction | PyMuPDF first, PaddleOCR fallback | Fast for born-digital PDFs, OCR for scanned docs | Best hybrid approach |
-| Vector DB | Qdrant | Named vectors, filters, local mode, production path | Strong long-term choice |
+| PDF extraction | PyMuPDF first, Tesseract + pytesseract fallback | Fast for born-digital PDFs, OCR for scanned docs | Best hybrid approach |
+| Vector DB | Chroma Cloud | Named collections, cosine similarity, session-filtered retrieval | Good for multimodal text/image workflows |
 | Simpler alternative | Chroma | Easy local setup; supports multimodal text/image workflows | Good for quick demos |
 | Reranker | `BAAI/bge-reranker-base` | Improves retrieval precision | Optional in v1.1 |
-| LLM | Qwen2.5-3B-Instruct GGUF or Phi-3.5-mini-instruct | Open-source chat generation | Better hosted separately for production |
+| LLM | Grok (via Groq API) | Fast inference, OpenAI-compatible endpoint | External API |
 
 ---
 
@@ -296,45 +296,18 @@ Instead:
 
 ## 8) Flow 1 Design: Vector Database and Storage Layout
 
-## Recommended primary choice: Qdrant
+## Chroma Cloud with separate collections per modality
 
-Why Qdrant is a strong fit:
+Six fixed collections created at startup:
 
-- supports **payload filtering**
-- supports **named vectors**
-- supports **local mode** for small deployments
-- has a smooth path to a real server later
+- `text_chunks` — BGE 384-dim — born-digital text
+- `ocr_chunks` — BGE 384-dim — OCR-extracted text
+- `image_chunks` — OpenCLIP 512-dim — image embeddings
+- `audio_transcript_chunks` — BGE 384-dim — audio transcripts
+- `video_transcript_chunks` — BGE 384-dim — video transcripts
+- `video_keyframe_chunks` — OpenCLIP 512-dim — video keyframes
 
-### Suggested collection strategy
-
-Use **one logical collection per tenant/project/workspace**, with payload-based filtering and modality metadata.
-
-Important Qdrant note:
-
-- vectors within a given vector field must share dimensionality
-- different modalities often produce different vector sizes
-
-So use either:
-
-1. **named vectors** in one collection, or
-2. **separate collections per modality**
-
-### Recommended practical pattern
-
-For v1, use **separate collections**:
-
-- `text_chunks`
-- `image_chunks`
-- `audio_chunks`
-- `video_chunks`
-
-Then merge retrieval results in the app layer.
-
-This is simpler than cross-modality scoring inside one collection.
-
-## Simpler alternative: Chroma
-
-Chroma is easier for quick demos and has documented multimodal support for text and images. It is a good fallback if you want the fastest initial build. However, for a broader txt/pdf/image/audio/video roadmap, Qdrant gives a cleaner long-term structure.
+All records tagged with `session_id`, `document_id`, `chunk_id`, `ingestion_status`, and modality metadata. Retrieval always filtered by `session_id`.
 
 ---
 
@@ -618,40 +591,21 @@ Why:
 
 ---
 
-## 16) Final Recommended Stack for Your Project
+## 16) Adopted Stack
 
-If the goal is **practical, open-source, lightweight, and deployable**, this is the best balanced stack:
-
-- **UI:** Streamlit
-- **Backend:** Python
-- **Text embedding:** `BAAI/bge-small-en-v1.5`
-- **Image embedding:** OpenCLIP ViT-B/32
-- **PDF parsing:** PyMuPDF
-- **OCR fallback:** PaddleOCR
-- **Audio transcription:** Faster-Whisper
-- **Audio embedding (optional):** LAION CLAP
-- **Video pipeline:** FFmpeg + Faster-Whisper + OpenCLIP keyframes
-- **Vector DB:** Qdrant
-- **Reranker (optional):** `BAAI/bge-reranker-base`
-- **Open-source chat model:** Qwen2.5-3B-Instruct GGUF or Phi-3.5 mini
-
-## Best MVP scope
-
-Start with:
-
-- txt
-- pdf
-- image
-- Qdrant
-- text/image retrieval
-- citation-based chat
-
-Then extend to:
-
-- audio
-- video
-- reranking
-- filtering
+- **UI:** Streamlit (tabbed Upload + Chat)
+- **Backend:** Python modules inside the same Streamlit process
+- **Text embedding:** `BAAI/bge-small-en-v1.5` (384-dim, BGE)
+- **Image embedding:** OpenCLIP ViT-B/32 (512-dim)
+- **PDF parsing:** PyMuPDF (digital pages) + Tesseract + pytesseract (scanned pages)
+- **OCR:** Tesseract 5.x + pytesseract
+- **Audio transcription:** Faster-Whisper (`base` model, CPU)
+- **Video pipeline:** FFmpeg (system binary) + Faster-Whisper + OpenCLIP keyframes
+- **Vector DB:** Chroma Cloud (6 fixed collections, cosine similarity, session-filtered)
+- **LLM answer generation:** Grok API (Groq-compatible OpenAI endpoint)
+- **Chat history:** SQLite (same process, 200-message limit per session)
+- **Logging:** Python `logging` to console + `logs/app.log`
+- **Session isolation:** `session_id` metadata filter on every Chroma query
 
 ---
 
@@ -666,9 +620,9 @@ Then extend to:
 - Chroma introduction: https://docs.trychroma.com/docs/overview/introduction
 - Chroma getting started: https://docs.trychroma.com/docs/overview/getting-started
 - Chroma multimodal embeddings: https://docs.trychroma.com/docs/embeddings/multimodal
-- Qdrant quickstart: https://qdrant.tech/documentation/quickstart/
-- Qdrant collections: https://qdrant.tech/documentation/manage-data/collections/
-- Qdrant local mode via LangChain integration docs: https://qdrant.tech/documentation/frameworks/langchain/#local-mode
+- Tesseract OCR: https://github.com/tesseract-ocr/tesseract
+- pytesseract: https://github.com/madmaze/pytesseract
+- Groq API docs: https://console.groq.com/docs/openai
 - Sentence Transformers docs: https://www.sbert.net/
 - OpenAI CLIP repository: https://github.com/openai/CLIP
 - Whisper repository: https://github.com/openai/whisper
@@ -680,7 +634,6 @@ Then extend to:
 
 - Radford et al., **Learning Transferable Visual Models From Natural Language Supervision (CLIP)**, 2021: https://arxiv.org/abs/2103.00020
 - Radford et al., **Robust Speech Recognition via Large-Scale Weak Supervision (Whisper)**, 2022: https://arxiv.org/abs/2212.04356
-- Wu et al., **Large-scale Contrastive Language-Audio Pretraining with Feature Fusion and Keyword-to-Caption Augmentation (CLAP)**, 2022: https://arxiv.org/abs/2211.06687
 - Liu et al., **Visual Instruction Tuning (LLaVA)**, 2023: https://arxiv.org/abs/2304.08485
 - Lewis et al., **Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks**, 2020: https://arxiv.org/abs/2005.11401
 - Reimers and Gurevych, **Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks**, 2019: https://arxiv.org/abs/1908.10084

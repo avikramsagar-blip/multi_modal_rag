@@ -14,14 +14,17 @@ from __future__ import annotations
 import io
 from typing import Literal
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 import streamlit as st
 from PIL import Image
 
 from core.limits import MAX_PDF_PAGES, MIN_OCR_CONFIDENCE, PDF_TEXT_THRESHOLD
+from core.logging_config import get_logger
 from ingestion.chunking import chunk_text
 from ingestion.metadata import build_metadata
 from utils.ocr import run_ocr
+
+logger = get_logger(__name__)
 
 PageType = Literal[
     "digital_text_page",
@@ -80,6 +83,14 @@ def _extract_embedded_images(
     return images
 
 
+def _table_rows_to_chunks(text: str) -> list[str]:
+    """Best-effort row-wise chunking for table-like pages."""
+    rows = [line.strip() for line in text.splitlines() if line.strip()]
+    if not rows:
+        return []
+    return rows
+
+
 def parse_pdf(
     file_bytes: bytes,
     filename: str,
@@ -95,6 +106,7 @@ def parse_pdf(
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     total_pages = min(len(doc), MAX_PDF_PAGES)
+    logger.info("Parsing PDF | file=%s | pages=%d", filename, total_pages)
 
     results: list[dict] = []
 
@@ -115,7 +127,7 @@ def parse_pdf(
                     source_type="pdf",
                     modality="text",
                     session_id=session_id,
-                    page_number=page_num,
+                    page_number=page_num + 1,
                     parser_used="pymupdf",
                 )
                 results.append({"chunk_id": chunk_id, "embedding": embedding, "text": chunk, "metadata": meta})
@@ -124,7 +136,14 @@ def parse_pdf(
         elif page_type == "scanned_page":
             pil_img = _page_to_pil(page)
             ocr_text, confidence = run_ocr(pil_img)
-            if ocr_text and confidence >= MIN_OCR_CONFIDENCE:
+            if ocr_text:
+                if confidence < MIN_OCR_CONFIDENCE:
+                    logger.warning(
+                        "Low OCR confidence retained | file=%s | page=%d | confidence=%.3f",
+                        filename,
+                        page_num + 1,
+                        confidence,
+                    )
                 for i, chunk in enumerate(chunk_text(ocr_text)):
                     chunk_id = f"{document_id}_p{page_num}_ocr_{i}"
                     [embedding] = text_embedder.embed([chunk])
@@ -135,7 +154,7 @@ def parse_pdf(
                         source_type="pdf",
                         modality="ocr",
                         session_id=session_id,
-                        page_number=page_num,
+                        page_number=page_num + 1,
                         parser_used="paddleocr",
                         ocr_confidence=confidence,
                     )
@@ -155,7 +174,7 @@ def parse_pdf(
                     source_type="pdf",
                     modality="text",
                     session_id=session_id,
-                    page_number=page_num,
+                    page_number=page_num + 1,
                     parser_used="pymupdf",
                 )
                 results.append({"chunk_id": chunk_id, "embedding": embedding, "text": chunk, "metadata": meta})
@@ -165,7 +184,15 @@ def parse_pdf(
             for img_idx, pil_img in enumerate(embedded_imgs):
                 # OCR on embedded image
                 ocr_text, confidence = run_ocr(pil_img)
-                if ocr_text and confidence >= MIN_OCR_CONFIDENCE:
+                if ocr_text:
+                    if confidence < MIN_OCR_CONFIDENCE:
+                        logger.warning(
+                            "Low OCR confidence retained | file=%s | page=%d | image_block=%d | confidence=%.3f",
+                            filename,
+                            page_num + 1,
+                            img_idx,
+                            confidence,
+                        )
                     chunk_id = f"{document_id}_p{page_num}_img{img_idx}_ocr"
                     [embedding] = text_embedder.embed([ocr_text])
                     meta = build_metadata(
@@ -175,7 +202,7 @@ def parse_pdf(
                         source_type="pdf",
                         modality="ocr",
                         session_id=session_id,
-                        page_number=page_num,
+                        page_number=page_num + 1,
                         parser_used="paddleocr",
                         ocr_confidence=confidence,
                     )
@@ -191,7 +218,7 @@ def parse_pdf(
                     source_type="pdf",
                     modality="image",
                     session_id=session_id,
-                    page_number=page_num,
+                    page_number=page_num + 1,
                     parser_used="openclip",
                 )
                 results.append({"chunk_id": chunk_id, "embedding": img_embedding, "text": "", "metadata": meta})
@@ -202,7 +229,14 @@ def parse_pdf(
 
             # OCR
             ocr_text, confidence = run_ocr(pil_img)
-            if ocr_text and confidence >= MIN_OCR_CONFIDENCE:
+            if ocr_text:
+                if confidence < MIN_OCR_CONFIDENCE:
+                    logger.warning(
+                        "Low OCR confidence retained | file=%s | page=%d | confidence=%.3f",
+                        filename,
+                        page_num + 1,
+                        confidence,
+                    )
                 chunk_id = f"{document_id}_p{page_num}_ocr_0"
                 [embedding] = text_embedder.embed([ocr_text])
                 meta = build_metadata(
@@ -212,7 +246,7 @@ def parse_pdf(
                     source_type="pdf",
                     modality="ocr",
                     session_id=session_id,
-                    page_number=page_num,
+                    page_number=page_num + 1,
                     parser_used="paddleocr",
                     ocr_confidence=confidence,
                 )
@@ -228,7 +262,7 @@ def parse_pdf(
                 source_type="pdf",
                 modality="image",
                 session_id=session_id,
-                page_number=page_num,
+                page_number=page_num + 1,
                 parser_used="openclip",
             )
             results.append({"chunk_id": chunk_id, "embedding": img_embedding, "text": "", "metadata": meta})
@@ -237,8 +271,9 @@ def parse_pdf(
         elif page_type == "table_heavy_page":
             text = page.get_text("text").strip()
             if len(text) >= PDF_TEXT_THRESHOLD:
-                # Use direct text if available
-                for i, chunk in enumerate(chunk_text(text)):
+                # Prefer row-level chunks for table-like text.
+                row_chunks = _table_rows_to_chunks(text)
+                for i, chunk in enumerate(row_chunks):
                     chunk_id = f"{document_id}_p{page_num}_tbl_{i}"
                     [embedding] = text_embedder.embed([chunk])
                     meta = build_metadata(
@@ -248,7 +283,7 @@ def parse_pdf(
                         source_type="pdf",
                         modality="text",
                         session_id=session_id,
-                        page_number=page_num,
+                        page_number=page_num + 1,
                         parser_used="pymupdf_table",
                     )
                     results.append({"chunk_id": chunk_id, "embedding": embedding, "text": chunk, "metadata": meta})
@@ -256,7 +291,14 @@ def parse_pdf(
                 # Fall back to OCR
                 pil_img = _page_to_pil(page)
                 ocr_text, confidence = run_ocr(pil_img)
-                if ocr_text and confidence >= MIN_OCR_CONFIDENCE:
+                if ocr_text:
+                    if confidence < MIN_OCR_CONFIDENCE:
+                        logger.warning(
+                            "Low OCR confidence retained | file=%s | page=%d | confidence=%.3f",
+                            filename,
+                            page_num + 1,
+                            confidence,
+                        )
                     chunk_id = f"{document_id}_p{page_num}_tbl_ocr"
                     [embedding] = text_embedder.embed([ocr_text])
                     meta = build_metadata(
@@ -266,11 +308,12 @@ def parse_pdf(
                         source_type="pdf",
                         modality="ocr",
                         session_id=session_id,
-                        page_number=page_num,
+                        page_number=page_num + 1,
                         parser_used="paddleocr_table",
                         ocr_confidence=confidence,
                     )
                     results.append({"chunk_id": chunk_id, "embedding": embedding, "text": ocr_text, "metadata": meta})
 
     doc.close()
+    logger.info("PDF parsed | file=%s | chunks=%d", filename, len(results))
     return results

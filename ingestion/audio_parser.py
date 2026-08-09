@@ -14,8 +14,11 @@ from pathlib import Path
 import streamlit as st
 
 from core.limits import MAX_AUDIO_SEC, MIN_TRANSCRIPT_WORDS
+from core.logging_config import get_logger
 from ingestion.chunking import chunk_text
 from ingestion.metadata import build_metadata
+
+logger = get_logger(__name__)
 
 _whisper_model = None
 
@@ -43,6 +46,7 @@ def parse_audio(
     """
     text_embedder = st.session_state["text_embedder"]
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "audio"
+    logger.info("Parsing audio | file=%s", filename)
 
     # Write to a temp file so Whisper can read it
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
@@ -59,6 +63,12 @@ def parse_audio(
 
         # Enforce duration limit
         if info.duration > MAX_AUDIO_SEC:
+            logger.warning(
+                "Audio exceeds duration limit | file=%s | duration=%.2f | max=%d",
+                filename,
+                info.duration,
+                MAX_AUDIO_SEC,
+            )
             raise ValueError(
                 f"Audio duration {info.duration:.0f}s exceeds limit of {MAX_AUDIO_SEC}s."
             )
@@ -83,6 +93,11 @@ def parse_audio(
         combined = " ".join(buf_text).strip()
         word_count = len(combined.split())
         if word_count < MIN_TRANSCRIPT_WORDS:
+            logger.warning(
+                "Transcript buffer dropped due to low word count | file=%s | words=%d",
+                filename,
+                word_count,
+            )
             return None
         sub_chunks = chunk_text(combined)
         out = []
@@ -123,4 +138,5 @@ def parse_audio(
         if flushed:
             results.extend(flushed)
 
+    logger.info("Audio parsed | file=%s | chunks=%d", filename, len(results))
     return results

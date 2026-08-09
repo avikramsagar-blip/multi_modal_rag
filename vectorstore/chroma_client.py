@@ -12,11 +12,14 @@ Chroma Cloud client.
 from __future__ import annotations
 
 import chromadb
-from chromadb.config import Settings as ChromaSettings
+
+from core.logging_config import get_logger
 
 from core.config import settings
 from embeddings.image_embedder import EMBEDDING_DIM as IMAGE_DIM
 from embeddings.text_embedder import EMBEDDING_DIM as TEXT_DIM
+
+logger = get_logger(__name__)
 
 # Collection name → expected embedding dimension
 COLLECTIONS: dict[str, int] = {
@@ -54,6 +57,11 @@ class ChromaWrapper:
     def __init__(self) -> None:
         global _client
         if _client is None:
+            logger.info(
+                "Initializing Chroma Cloud client for tenant=%s database=%s",
+                settings.chroma_tenant,
+                settings.chroma_database,
+            )
             _client = chromadb.CloudClient(
                 tenant=settings.chroma_tenant,
                 database=settings.chroma_database,
@@ -70,6 +78,10 @@ class ChromaWrapper:
                 metadata={"hnsw:space": "cosine"},
             )
             self._collections[name] = col
+            logger.info("Chroma collection ready: %s", name)
+
+    def list_collection_names(self) -> list[str]:
+        return sorted(self._collections.keys())
 
     def _get_collection(self, name: str) -> chromadb.Collection:
         if name not in self._collections:
@@ -110,7 +122,10 @@ class ChromaWrapper:
         successful write.
         """
         if not chunks:
+            logger.warning("write_chunks called with no chunks")
             return
+
+        logger.info("Writing %d chunks to Chroma", len(chunks))
 
         # Group chunks by target collection
         grouped: dict[str, list[dict]] = {}
@@ -119,17 +134,33 @@ class ChromaWrapper:
             col_name = MODALITY_TO_COLLECTION.get(modality)
             if col_name is None:
                 raise ValueError(f"Unknown modality '{modality}' in chunk metadata.")
+            chunk["metadata"]["ingestion_status"] = "pending"
             grouped.setdefault(col_name, []).append(chunk)
 
-        for col_name, col_chunks in grouped.items():
-            self.upsert_chunks(
-                collection_name=col_name,
-                ids=[c["chunk_id"] for c in col_chunks],
-                embeddings=[c["embedding"] for c in col_chunks],
-                metadatas=[c["metadata"] for c in col_chunks],
-                documents=[c.get("text", "") for c in col_chunks],
-            )
+        try:
+            # Phase 1: write pending records
+            for col_name, col_chunks in grouped.items():
+                self.upsert_chunks(
+                    collection_name=col_name,
+                    ids=[c["chunk_id"] for c in col_chunks],
+                    embeddings=[c["embedding"] for c in col_chunks],
+                    metadatas=[c["metadata"] for c in col_chunks],
+                    documents=[c.get("text", "") for c in col_chunks],
+                )
 
-        # Mark all chunks complete after successful writes
-        for chunk in chunks:
-            chunk["metadata"]["ingestion_status"] = "complete"
+            # Phase 2: mark all successful records complete and persist again
+            for chunk in chunks:
+                chunk["metadata"]["ingestion_status"] = "complete"
+
+            for col_name, col_chunks in grouped.items():
+                self.upsert_chunks(
+                    collection_name=col_name,
+                    ids=[c["chunk_id"] for c in col_chunks],
+                    embeddings=[c["embedding"] for c in col_chunks],
+                    metadatas=[c["metadata"] for c in col_chunks],
+                    documents=[c.get("text", "") for c in col_chunks],
+                )
+            logger.info("Successfully wrote and finalized %d chunks", len(chunks))
+        except Exception:
+            logger.exception("Failed to fully write chunks to Chroma")
+            raise

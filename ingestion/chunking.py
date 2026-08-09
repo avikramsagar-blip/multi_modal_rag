@@ -8,7 +8,6 @@ Uses tiktoken for token counting (cl100k_base encoding — same as GPT-4).
 from __future__ import annotations
 
 import re
-from typing import Iterator
 
 import tiktoken
 
