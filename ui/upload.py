@@ -33,29 +33,60 @@ logger = get_logger(__name__)
 
 
 def render_upload_ui() -> None:
-    st.header("📂 Upload Documents")
-    st.caption(
-        f"Supported: {', '.join(SUPPORTED_EXTENSIONS)}  •  "
-        f"Max {MAX_FILES_PER_BATCH} files per batch"
-    )
+    # Top header with custom styling container
+    st.markdown("""
+        <div style="background-color: #161b22; padding: 20px; border-radius: 10px; border: 1px solid #30363d; margin-bottom: 20px;">
+            <h3 style="margin: 0; color: #58a6ff;">📂 Multimodal Document Ingestion</h3>
+            <p style="margin: 5px 0 0 0; color: #8b949e; font-size: 14px;">
+                Upload documents, text, images, audio, or video files to embed them into your active Chroma Cloud collection.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
 
     current_session_id = st.session_state["session_id"]
-    st.info(f"Current session: {current_session_id}")
-    if st.button("Start new session", type="secondary"):
-        new_id = start_new_session()
-        logger.info("Started new session | old_session_id=%s | new_session_id=%s", current_session_id, new_id)
-        st.success(f"New session started: {new_id}")
-        st.rerun()
+    
+    # Session Management Layout Columns
+    col_sess_info, col_sess_btn = st.columns([3, 1])
+    with col_sess_info:
+        st.caption(f"🔒 Active Session ID: `{current_session_id}`")
+    with col_sess_btn:
+        if st.button("🔄 New Session", type="secondary", use_container_width=True):
+            new_id = start_new_session()
+            logger.info("Started new session | old_session_id=%s | new_session_id=%s", current_session_id, new_id)
+            st.success(f"Started: {new_id}")
+            st.rerun()
 
+    st.markdown("---")
+
+    # File uploader with descriptive text
     uploaded_files = st.file_uploader(
-        label="Choose files",
+        label=f"Drag and drop files here (Max {MAX_FILES_PER_BATCH} files per batch)",
         type=SUPPORTED_EXTENSIONS,
         accept_multiple_files=True,
         key="file_uploader",
     )
 
     if not uploaded_files:
+        # Show an empty state card to guide the user
+        st.info("👆 Select or drop files above to begin the multi-modal pipeline execution.")
         return
+
+    # Display a quick file summary queue before triggering ingestion
+    st.markdown("#### 📋 Staged Queue Overview")
+    for idx, f in enumerate(uploaded_files[:MAX_FILES_PER_BATCH]):
+        st.markdown(f"`{idx + 1}.` **{f.name}** ({len(f.getvalue()) / 1024:.1f} KB)")
+
+    st.markdown("")
+
+    # Primary action button with clear styling state
+    is_running = st.session_state.get("is_ingestion_running", False)
+    if st.button(
+        "▶️ Execute Ingestion Pipeline",
+        type="primary",
+        disabled=is_running,
+        use_container_width=True,
+    ):
+        _run_ingestion(uploaded_files)
 
     if st.button(
         "▶️ Ingest files",
