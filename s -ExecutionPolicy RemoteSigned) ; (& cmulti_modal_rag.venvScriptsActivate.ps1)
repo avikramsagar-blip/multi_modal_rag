@@ -1,0 +1,33 @@
+[1mdiff --git a/retrieval/router.py b/retrieval/router.py[m
+[1mindex 8a1869a..83340dd 100644[m
+[1m--- a/retrieval/router.py[m
+[1m+++ b/retrieval/router.py[m
+[36m@@ -16,24 +16,16 @@[m [mlogger = get_logger(__name__)[m
+ _SIGNAL_RULES: list[tuple[str, list[str], list[str]]] = [[m
+     ([m
+         "ocr",[m
+[31m-        ["scanned", "scan", "handwritten", "ocr", "printed text", "text in image"],[m
+[32m+[m[32m        ["scanned", "scan", "handwritten", "ocr", "printed text", "text in image",[m
+[32m+[m[32m         "screenshot", "document", "invoice", "receipt", "form", "letter", "read"],[m
+         ["ocr_chunks"],[m
+     ),[m
+     ([m
+         "image",[m
+         ["image", "chart", "diagram", "figure", "graph", "screenshot", "photo", "visual", "depicted"],[m
+[31m-        ["image_chunks", "video_keyframe_chunks"],[m
+[31m-    ),[m
+[31m-    ([m
+[31m-        "audio",[m
+[31m-        ["audio", "recording", "call", "meeting", "what was said", "spoken", "voice"],[m
+[31m-        ["audio_transcript_chunks"],[m
+[31m-    ),[m
+[31m-    ([m
+[31m-        "video",[m
+[31m-        ["video", "clip", "frame", "keyframe", "scene", "at minute", "at second"],[m
+[31m-        ["video_transcript_chunks", "video_keyframe_chunks"],[m
+[32m+[m[32m        ["image_chunks", "video_keyframe_chunks", "ocr_chunks"],  # screenshots/photos often contain text too[m
+     ),[m
+[32m+[m[32m    ...[m
+ ][m
+ [m
+ # "transcript" alone is ambiguous — triggers both audio and video families[m

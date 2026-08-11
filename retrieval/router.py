@@ -25,7 +25,7 @@ _SIGNAL_RULES: list[tuple[str, list[str], list[str]]] = [
         ["image", "chart", "diagram", "figure", "graph", "screenshot", "photo", "visual", "depicted"],
         ["image_chunks", "video_keyframe_chunks", "ocr_chunks"],  # screenshots/photos often contain text too
     ),
-    ...
+    
 ]
 
 # "transcript" alone is ambiguous — triggers both audio and video families
