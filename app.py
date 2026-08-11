@@ -1,8 +1,8 @@
 """
 app.py — Multimodal RAG Streamlit application entry point.
 
-Flow 1 (ingestion) is wired here.
-Flow 2 (chat/retrieval) will be added in a later phase.
+Flow 1 (ingestion) and Flow 2 (chat/retrieval) are both wired here,
+exposed as tabs in the main UI.
 """
 from dotenv import load_dotenv
 load_dotenv()

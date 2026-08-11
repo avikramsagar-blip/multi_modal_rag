@@ -16,24 +16,16 @@ logger = get_logger(__name__)
 _SIGNAL_RULES: list[tuple[str, list[str], list[str]]] = [
     (
         "ocr",
-        ["scanned", "scan", "handwritten", "ocr", "printed text", "text in image"],
+        ["scanned", "scan", "handwritten", "ocr", "printed text", "text in image",
+         "screenshot", "document", "invoice", "receipt", "form", "letter", "read"],
         ["ocr_chunks"],
     ),
     (
         "image",
         ["image", "chart", "diagram", "figure", "graph", "screenshot", "photo", "visual", "depicted"],
-        ["image_chunks", "video_keyframe_chunks"],
+        ["image_chunks", "video_keyframe_chunks", "ocr_chunks"],  # screenshots/photos often contain text too
     ),
-    (
-        "audio",
-        ["audio", "recording", "call", "meeting", "what was said", "spoken", "voice"],
-        ["audio_transcript_chunks"],
-    ),
-    (
-        "video",
-        ["video", "clip", "frame", "keyframe", "scene", "at minute", "at second"],
-        ["video_transcript_chunks", "video_keyframe_chunks"],
-    ),
+    ...
 ]
 
 # "transcript" alone is ambiguous — triggers both audio and video families
@@ -53,8 +45,8 @@ def route_query(query: str) -> tuple[list[str], bool, bool]:
         needs_image_embed whether OpenCLIP embedding is needed
     """
     query_lower = query.lower()
-    # ocr_chunks always included — scanned PDFs/images go there and should always be searched
-    collections: set[str] = {"text_chunks", "ocr_chunks"}
+    # Default to text-only retrieval; OCR chunks are searched only when OCR intent is detected.
+    collections: set[str] = {"text_chunks"}
     triggered: list[str] = []
 
     for signal_name, keywords, extra_collections in _SIGNAL_RULES:

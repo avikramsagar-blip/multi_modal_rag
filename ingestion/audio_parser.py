@@ -32,6 +32,11 @@ def _get_whisper():
     return _whisper_model
 
 
+class AudioDurationExceeded(ValueError):
+    """Raised when an audio file exceeds MAX_AUDIO_SEC. Caller may treat this
+    as a user-facing validation error rather than a crash."""
+
+
 def parse_audio(
     file_bytes: bytes,
     filename: str,
@@ -43,6 +48,15 @@ def parse_audio(
 
     Each chunk captures a contiguous set of transcript sentences with
     start_time and end_time from Whisper segment timestamps.
+
+    Never raises for transcription failures (model load errors, corrupt
+    audio, unsupported codecs, OOM, etc.) — those are logged and an empty
+    list is returned so a single bad file can't take down ingestion.
+
+    Raises AudioDurationExceeded if the file is longer than MAX_AUDIO_SEC —
+    this is treated as an expected validation error, not a crash, and callers
+    (e.g. app.py's upload dispatcher) should catch it and show the user a
+    clear message.
     """
     text_embedder = st.session_state["text_embedder"]
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "audio"
@@ -54,14 +68,20 @@ def parse_audio(
         tmp_path = tmp.name
 
     try:
-        model = _get_whisper()
-        segments, info = model.transcribe(
-            tmp_path,
-            beam_size=5,
-            condition_on_previous_text=False,
-        )
+        try:
+            model = _get_whisper()
+            segments, info = model.transcribe(
+                tmp_path,
+                beam_size=5,
+                condition_on_previous_text=False,
+            )
+        except Exception:
+            # Model load failure, corrupt/unsupported audio, OOM, etc.
+            logger.exception("Whisper transcription failed | file=%s", filename)
+            return []
 
-        # Enforce duration limit
+        # Enforce duration limit — intentional validation error, re-raised
+        # so the caller can decide how to surface it (not swallowed here).
         if info.duration > MAX_AUDIO_SEC:
             logger.warning(
                 "Audio exceeds duration limit | file=%s | duration=%.2f | max=%d",
@@ -69,12 +89,16 @@ def parse_audio(
                 info.duration,
                 MAX_AUDIO_SEC,
             )
-            raise ValueError(
+            raise AudioDurationExceeded(
                 f"Audio duration {info.duration:.0f}s exceeds limit of {MAX_AUDIO_SEC}s."
             )
 
-        # Collect all segments
-        seg_list = list(segments)
+        try:
+            seg_list = list(segments)
+        except Exception:
+            # Segment iteration can itself fail mid-stream on malformed audio
+            logger.exception("Failed while reading Whisper segments | file=%s", filename)
+            return []
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -103,7 +127,15 @@ def parse_audio(
         out = []
         for sub_i, sub_chunk in enumerate(sub_chunks):
             cid = f"{document_id}_audio_{idx}_{sub_i}"
-            [embedding] = text_embedder.embed([sub_chunk])
+            try:
+                [embedding] = text_embedder.embed([sub_chunk])
+            except Exception:
+                logger.exception(
+                    "Embedding failed for audio chunk — skipped | file=%s | chunk_id=%s",
+                    filename,
+                    cid,
+                )
+                continue
             meta = build_metadata(
                 document_id=document_id,
                 chunk_id=cid,

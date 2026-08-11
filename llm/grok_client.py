@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 import httpx
+import tiktoken
 
 from core.config import settings
 from core.limits import MAX_CONTEXT_TOKENS
@@ -22,6 +23,19 @@ _SYSTEM_PROMPT = (
     "If the context does not contain enough information to answer, say so clearly. "
     "Do not invent facts or citations."
 )
+_ENCODING = tiktoken.get_encoding("cl100k_base")
+
+
+def _truncate_context_to_limit(context: str, limit: int) -> str:
+    if not context.strip():
+        return context
+
+    tokens = _ENCODING.encode(context)
+    if len(tokens) <= limit:
+        return context
+
+    truncated = _ENCODING.decode(tokens[:limit])
+    return truncated.strip()
 
 
 def ask_grok(query: str, context: str) -> tuple[str, str]:
@@ -33,10 +47,15 @@ def ask_grok(query: str, context: str) -> tuple[str, str]:
         logger.warning("ask_grok called with empty context")
         return "No relevant content was found in your uploaded documents for this question.", ""
 
+    bounded_context = _truncate_context_to_limit(context, MAX_CONTEXT_TOKENS)
+    if not bounded_context.strip():
+        logger.warning("ask_grok called with empty context after token truncation")
+        return "No relevant content was found in your uploaded documents for this question.", ""
+
     grok_request_id = uuid.uuid4().hex
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
+        {"role": "user", "content": f"Context:\n{bounded_context}\n\nQuestion: {query}"},
     ]
 
     logger.info("Sending request to Grok | model=%s | grok_request_id=%s", settings.grok_model, grok_request_id)

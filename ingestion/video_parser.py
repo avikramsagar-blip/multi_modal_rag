@@ -8,6 +8,11 @@ Pipeline:
   2. Check duration against MAX_VIDEO_SEC
   3. Extract audio → transcribe (reuses audio_parser logic) → video_transcript_chunks
   4. Extract keyframes → deduplicate by perceptual hash → embed → video_keyframe_chunks
+
+Both stages (3) and (4) are independent: a failure in one does not prevent
+the other from contributing chunks. A video with a broken audio track still
+returns keyframe chunks, and a video whose keyframe extraction fails still
+returns transcript chunks.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from core.limits import (
     MAX_VIDEO_SEC,
 )
 from core.logging_config import get_logger
-from ingestion.audio_parser import parse_audio
+from ingestion.audio_parser import AudioDurationExceeded, parse_audio
 from ingestion.metadata import build_metadata
 from utils.ffmpeg import extract_audio, extract_keyframes, get_video_duration
 
@@ -35,6 +40,11 @@ _HASH_DISTANCE_THRESHOLD = 10
 _MIN_BRIGHTNESS = 8.0
 
 logger = get_logger(__name__)
+
+
+class VideoDurationExceeded(ValueError):
+    """Raised when a video file exceeds MAX_VIDEO_SEC. Caller may treat this
+    as a user-facing validation error rather than a crash."""
 
 
 def _deduplicate_frames(
@@ -68,6 +78,12 @@ def parse_video(
 ) -> list[dict]:
     """
     Parse a video file and return chunk dicts for transcript + keyframes.
+
+    Raises VideoDurationExceeded if the file is longer than MAX_VIDEO_SEC —
+    an expected validation error the caller should catch and surface to the
+    user. All other failures (missing audio track, corrupt stream, ffmpeg
+    errors, embedding failures) are caught and logged per-pipeline, so the
+    function still returns whatever chunks it was able to produce.
     """
     image_embedder = st.session_state["image_embedder"]
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "video"
@@ -82,7 +98,12 @@ def parse_video(
 
     try:
         # Duration guard
-        duration = get_video_duration(video_path)
+        try:
+            duration = get_video_duration(video_path)
+        except Exception:
+            logger.exception("Could not read video duration — file may be corrupt | file=%s", filename)
+            return []
+
         if duration > MAX_VIDEO_SEC:
             logger.warning(
                 "Video exceeds duration limit | file=%s | duration=%.2f | max=%d",
@@ -90,7 +111,7 @@ def parse_video(
                 duration,
                 MAX_VIDEO_SEC,
             )
-            raise ValueError(
+            raise VideoDurationExceeded(
                 f"Video duration {duration:.0f}s exceeds limit of {MAX_VIDEO_SEC}s."
             )
 
@@ -116,54 +137,73 @@ def parse_video(
                 chunk["chunk_id"] = new_id
                 chunk["metadata"]["chunk_id"] = new_id
             results.extend(audio_chunks)
-        except ValueError:
-            # No audio track — skip transcript pipeline
-            logger.warning("Video has no audio track; transcript pipeline skipped | file=%s", filename)
+        except AudioDurationExceeded:
+            # Extracted audio track itself is too long relative to
+            # MAX_AUDIO_SEC — skip transcript, keep going with keyframes.
+            logger.warning(
+                "Extracted audio exceeds audio duration limit; transcript skipped | file=%s",
+                filename,
+            )
+        except Exception:
+            # No audio track, ffmpeg extraction failure, or any other
+            # unexpected error — video still returns keyframe chunks below.
+            logger.exception(
+                "Audio/transcript pipeline failed for video; continuing without transcript | file=%s",
+                filename,
+            )
         finally:
             if audio_path:
                 audio_path.unlink(missing_ok=True)
 
         # ── Keyframe pipeline ──────────────────────────────────────────
-        frames = extract_keyframes(
-            video_path,
-            interval_sec=KEYFRAME_INTERVAL_SEC,
-            max_frames=MAX_KEYFRAMES,
-        )
-        non_blank_frames = [(ts, img) for ts, img in frames if not _is_blank_or_dark(img)]
-        dropped_blank = len(frames) - len(non_blank_frames)
-        if dropped_blank:
-            logger.warning("Dropped blank/dark frames | file=%s | count=%d", filename, dropped_blank)
+        try:
+            frames = extract_keyframes(
+                video_path,
+                interval_sec=KEYFRAME_INTERVAL_SEC,
+                max_frames=MAX_KEYFRAMES,
+            )
+            non_blank_frames = [(ts, img) for ts, img in frames if not _is_blank_or_dark(img)]
+            dropped_blank = len(frames) - len(non_blank_frames)
+            if dropped_blank:
+                logger.warning("Dropped blank/dark frames | file=%s | count=%d", filename, dropped_blank)
 
-        unique_frames = _deduplicate_frames(non_blank_frames)
-        logger.info(
-            "Keyframes selected | file=%s | raw=%d | filtered=%d",
-            filename,
-            len(frames),
-            len(unique_frames),
-        )
+            unique_frames = _deduplicate_frames(non_blank_frames)
+            logger.info(
+                "Keyframes selected | file=%s | raw=%d | filtered=%d",
+                filename,
+                len(frames),
+                len(unique_frames),
+            )
 
-        if unique_frames:
-            pil_images = [img for _, img in unique_frames]
-            timestamps = [ts for ts, _ in unique_frames]
+            if unique_frames:
+                pil_images = [img for _, img in unique_frames]
+                timestamps = [ts for ts, _ in unique_frames]
 
-            embeddings = image_embedder.embed_images(pil_images)
+                embeddings = image_embedder.embed_images(pil_images)
 
-            for i, (ts, embedding) in enumerate(zip(timestamps, embeddings)):
-                chunk_id = f"{document_id}_vkf_{i}"
-                meta = build_metadata(
-                    document_id=document_id,
-                    chunk_id=chunk_id,
-                    source_file_name=filename,
-                    source_type=ext,
-                    modality="video_keyframe",
-                    session_id=session_id,
-                    start_time=ts,
-                    end_time=ts,
-                    parser_used="openclip_keyframe",
-                )
-                results.append(
-                    {"chunk_id": chunk_id, "embedding": embedding, "text": "", "metadata": meta}
-                )
+                for i, (ts, embedding) in enumerate(zip(timestamps, embeddings)):
+                    chunk_id = f"{document_id}_vkf_{i}"
+                    meta = build_metadata(
+                        document_id=document_id,
+                        chunk_id=chunk_id,
+                        source_file_name=filename,
+                        source_type=ext,
+                        modality="video_keyframe",
+                        session_id=session_id,
+                        start_time=ts,
+                        end_time=ts,
+                        parser_used="openclip_keyframe",
+                    )
+                    results.append(
+                        {"chunk_id": chunk_id, "embedding": embedding, "text": "", "metadata": meta}
+                    )
+        except Exception:
+            # ffmpeg keyframe extraction failure, embedding failure, etc.
+            # Transcript chunks (if any) gathered above are still returned.
+            logger.exception(
+                "Keyframe pipeline failed for video; continuing with transcript-only results | file=%s",
+                filename,
+            )
 
     finally:
         video_path.unlink(missing_ok=True)
