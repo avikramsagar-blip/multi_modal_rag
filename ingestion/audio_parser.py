@@ -74,6 +74,7 @@ def parse_audio(
                 tmp_path,
                 beam_size=5,
                 condition_on_previous_text=False,
+                no_speech_threshold=0.6,  # <-- Add this line here
             )
         except Exception:
             # Model load failure, corrupt/unsupported audio, OOM, etc.
@@ -153,8 +154,10 @@ def parse_audio(
     SEGMENT_BUFFER_LIMIT = 10  # flush every N segments
 
     for seg in seg_list:
+        if hasattr(seg, "avg_logprob") and seg.avg_logprob < -1.0:
+            continue
+
         buffer_text.append(seg.text.strip())
-        buffer_end = seg.end
 
         if len(buffer_text) >= SEGMENT_BUFFER_LIMIT:
             flushed = _flush_buffer(buffer_text, buffer_start, buffer_end, chunk_index)
