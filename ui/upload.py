@@ -26,7 +26,12 @@ from ingestion.validators import (
     validate_all,
 )
 from storage.file_store import delete_staged_file, sanitize_filename, stage_file
-from ui.status import show_duplicate, show_error, show_ready
+from ui.status import (
+    show_duplicate,
+    show_error,
+    show_ready,
+    render_ingestion_dashboard,
+)
 from core.limits import MAX_FILES_PER_BATCH
 
 logger = get_logger(__name__)
@@ -94,6 +99,7 @@ def render_upload_ui() -> None:
         disabled=st.session_state.get("is_ingestion_running", False),
     ):
         _run_ingestion(uploaded_files)
+    render_ingestion_dashboard()
 
 
 def _run_ingestion(uploaded_files) -> None:
