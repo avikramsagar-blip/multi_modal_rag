@@ -93,12 +93,8 @@ def render_upload_ui() -> None:
     ):
         _run_ingestion(uploaded_files)
 
-    if st.button(
-        "▶️ Ingest files",
-        type="primary",
-        disabled=st.session_state.get("is_ingestion_running", False),
-    ):
-        _run_ingestion(uploaded_files)
+    
+    
     render_ingestion_dashboard()
 
 
